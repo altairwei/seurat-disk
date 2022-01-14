@@ -368,3 +368,181 @@ as.Seurat.h5Seurat <- function(
   }
   return(object)
 }
+
+#' Access cellular data
+#'
+#' Retrieves data (feature expression, PCA scores, metrics, etc.) for a set
+#' of cells in a Seurat object
+#'
+#' @inheritParams Seurat::FetchData
+#' @param object h5Seurat object
+#'
+#' @return A data frame with cells as rows and cellular data as columns
+#'
+#' @export
+FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
+  # Convert cell names to positions
+  cells <- cells %||% seq(1, object[["cell.names"]]$dims)
+  if (is.character(x = cells)) {
+    cells <- match(cells, Cells(object))
+  }
+  # Get a list of all objects to search through and their keys
+  keyed.field <- c('assays', 'reductions')
+  object.keys <- lapply(
+    X = keyed.field,
+    FUN = function(field) {
+      k <- vapply(
+        X = names(object[[field]]),
+        FUN = function(x) Key(object[[field]][[x]]),
+        FUN.VALUE = character(length = 1L),
+        USE.NAMES = FALSE
+      )
+      names(k) <- names(object[[field]])
+      return(k)
+    }
+  )
+  names(object.keys) <- keyed.field
+
+  # Find all vars that are keyed
+  keyed.types <- lapply(
+    X = object.keys,
+    FUN = function(keys) {
+      sapply(
+        X = keys,
+        FUN = function(key) {
+          if (length(x = key) == 0 || nchar(x = key) == 0) {
+            return(integer(length = 0L))
+          }
+          return(grep(pattern = paste0('^', key), x = vars))
+        }
+      )
+
+    }
+  )
+
+  keyed.types <- Filter(
+    f = length,
+    x = lapply(
+      X = keyed.types,
+      FUN = function(x) Filter(f = length, x = x)
+    )
+  )
+
+  data.fetched <- lapply(
+    X = names(keyed.types),
+    FUN = function(type) {
+      keyed.vars <- keyed.types[[type]]
+      lapply(
+        X = names(keyed.vars),
+        FUN = function(x) {
+          vars.use <- vars[keyed.vars[[x]]]
+          key.use <- object.keys[[type]][x]
+          data.return <- if (type == 'reductions') {
+            vars.use <- grep(
+              pattern = paste0('^', key.use, '[[:digit:]]+$'),
+              x = vars.use,
+              value = TRUE
+            )
+            if (length(x = vars.use) > 0) {
+              tryCatch(
+                expr = {
+                  dim.pos <- as.integer(sub(key.use, '', vars.use))
+                  embed.data <- object[[type]][[x]][["cell.embeddings"]]
+                  embeddings <- embed.data[cells, dim.pos, drop = FALSE]
+                  colnames(embeddings) <- vars.use
+                  embeddings
+                },
+                error = function(...) {
+                  return(NULL)
+                }
+              )
+            } else {
+              NULL
+            }
+          } else if (type == 'assays') {
+            vars.use <- gsub(
+              pattern = paste0('^', key.use),
+              replacement = '',
+              x = vars.use
+            )
+            features <- object[[type]][[x]][["features"]][]
+            #TODO: try not to load whole matrix
+            data.assay <- as.sparse(object[[type]][[x]][[slot]])
+            feature.pos <- match(vars.use, features)
+            data.vars <- t(x = as.matrix(data.assay[feature.pos, cells, drop = FALSE]))
+            if (ncol(data.vars) > 0) {
+              colnames(x = data.vars) <- paste0(key.use, vars.use)
+            }
+            data.vars
+          }
+          data.return <- as.list(x = as.data.frame(x = data.return))
+          return(data.return)
+        }
+      )
+    }
+  )
+
+  # Unlist twice
+  data.fetched <- unlist(x = data.fetched, recursive = FALSE)
+  data.fetched <- unlist(x = data.fetched, recursive = FALSE)
+
+  # Pull vars from object metadata
+  meta.vars <- vars[vars %in% names(object[["meta.data"]]) & !(vars %in% names(x = data.fetched))]
+  meta.list <- lapply(
+    X = meta.vars,
+    FUN = function(var) object[["meta.data"]][[var]][cells]
+  )
+  names(meta.list) <- meta.vars
+  data.fetched <- c(data.fetched, meta.list)
+
+  # Pull vars from the default assay
+  default.assay.features <- object[["assays"]][[DefaultAssay(object)]][["features"]][]
+  default.vars <- vars[vars %in% default.assay.features & !(vars %in% names(x = data.fetched))]
+  data.fetched <- c(
+    data.fetched,
+    tryCatch(
+      expr = {
+        #TODO: try not to load whole matrix
+        data.assay <- as.sparse(object[["assays"]][[DefaultAssay(object)]][[slot]])
+        feature.pos <- match(default.vars, default.assay.features)
+        data.vars <- t(x = as.matrix(data.assay[feature.pos, cells, drop = FALSE]))
+        if (ncol(data.vars) > 0) {
+          colnames(x = data.vars) <- default.vars
+        }
+        as.list(x = as.data.frame(x = data.vars))
+      },
+      error = function(...) {
+        return(NULL)
+      }
+    )
+  )
+
+  # Pull identities
+  if ('ident' %in% vars && !'ident' %in% names(object[["meta.data"]])) {
+    data.fetched[['ident']] <- structure(
+      Idents(object = object)[cells],
+      names = Cells(x = object)[cells]
+    )
+  }
+
+  fetched <- names(x = data.fetched)
+  vars.missing <- setdiff(x = vars, y = fetched)
+
+  # Assembled fetched vars in a data frame
+  data.fetched <- as.data.frame(
+    x = data.fetched,
+    row.names = Cells(x = object)[cells],
+    stringsAsFactors = FALSE
+  )
+
+  data.order <- na.omit(object = pmatch(
+    x = vars,
+    table = fetched
+  ))
+  if (length(x = data.order) > 1) {
+    data.fetched <- data.fetched[, data.order]
+  }
+  colnames(x = data.fetched) <- vars[vars %in% fetched]
+
+  data.fetched
+}
