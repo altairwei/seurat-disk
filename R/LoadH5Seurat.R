@@ -407,7 +407,7 @@ FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
   keyed.types <- lapply(
     X = object.keys,
     FUN = function(keys) {
-      sapply(
+      lapply(
         X = keys,
         FUN = function(key) {
           if (length(x = key) == 0 || nchar(x = key) == 0) {
