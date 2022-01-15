@@ -469,6 +469,14 @@ FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
             #TODO: try not to load whole matrix
             data.assay <- as.sparse(object[[type]][[x]][[slot]])
             feature.pos <- match(vars.use, features)
+            if (sum(is.na(feature.pos)) > 0) {
+              warning(
+                "features not found: ",
+                paste(vars.use[is.na(feature.pos)], collapse = ", "),
+                immediate. = TRUE, call. = FALSE)
+              vars.use <- vars.use[!is.na(feature.pos)]
+              feature.pos <- feature.pos[!is.na(feature.pos)]
+            }
             data.vars <- t(x = as.matrix(data.assay[feature.pos, cells, drop = FALSE]))
             if (ncol(data.vars) > 0) {
               colnames(x = data.vars) <- paste0(key.use, vars.use)
@@ -498,6 +506,7 @@ FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
   # Pull vars from the default assay
   default.assay.features <- object[["assays"]][[DefaultAssay(object)]][["features"]][]
   default.vars <- vars[vars %in% default.assay.features & !(vars %in% names(x = data.fetched))]
+  # TODO: warning not found features.
   data.fetched <- c(
     data.fetched,
     tryCatch(
