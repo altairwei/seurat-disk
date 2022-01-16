@@ -369,6 +369,107 @@ as.Seurat.h5Seurat <- function(
   return(object)
 }
 
+# Too slow
+.dgCMatrixGroupSubsetV1 <- function(x, i, j) {
+  if (!x$exists(name = 'data') || !x$exists(name = 'indices')
+        || !x$exists(name = 'indptr')) {
+    stop("x is not a HDF5 group of dgCMatrix", call. = FALSE)
+  }
+
+  dims <- h5attr(x, "dims")
+  data <- x[["data"]]
+  indices <- x[["indices"]]
+  indptr <- x[["indptr"]]
+
+  if (missing(i))
+    i <- seq_len(dims[1])
+  if (missing(j))
+    j <- seq_len(dims[2])
+
+  coldata <- lapply(
+    X = j,
+    FUN = function(col) {
+      # Get non-zero element number of current column
+      col.n <- indptr[col + 1] - indptr[col]
+      # It's the pos of start and end element of current column.
+      # Conver coords to 1-based.
+      start <- indptr[col] + 1
+      end <- start + col.n - 1
+      # Get pos of non-zero element, that match supplied rows.
+      col.pos <- seq(start, end)
+      data.pos <- match(i - 1, indices[col.pos]) + start - 1
+      data.return <- data.pos
+      data.return[!is.na(data.pos)] <- data[data.pos[!is.na(data.pos)]]
+      data.return[is.na(data.pos)] <- 0
+      data.return
+    }
+  )
+
+  mtx <- do.call(cbind, coldata)
+  mtx[is.na(mtx)] <- 0
+  mtx
+}
+
+.dgCMatrixGroupSubset <- function(x, i, j) {
+  if (!x$exists(name = 'data') || !x$exists(name = 'indices')
+        || !x$exists(name = 'indptr')) {
+    stop("x is not a HDF5 group of dgCMatrix", call. = FALSE)
+  }
+
+  dims <- h5attr(x, "dims")
+  data <- x[["data"]]
+  indices <- x[["indices"]]
+  indptr <- x[["indptr"]]
+
+  if (missing(i))
+    i <- seq_len(dims[1])
+  if (missing(j))
+    j <- seq_len(dims[2])
+
+  # Get column information
+  newcol.pos <- indptr[j]
+  col.n <- indptr[j + 1] - newcol.pos
+  start <- newcol.pos + 1
+  end <- start + col.n - 1
+
+  # Positions in non-zero data vector
+  pos <- integer(sum(col.n))
+  n.sum <- 0
+  for (idx in seq_along(col.n)) {
+    pos[n.sum + seq_len(col.n[idx])] <- seq(start[idx], end[idx])
+    n.sum <- n.sum + col.n[idx]
+  }
+
+  # Get row index of non-zero data in original matrix
+  row.index <- indices[pos]
+
+  # Get position of queried data
+  matched.pos <- integer(length(i) * length(j))
+  n.sum.1 <- n.sum.2 <- 0
+  for (idx in seq_along(col.n)) {
+    rng.1 <- n.sum.1 + seq_len(col.n[idx])
+    rng.2 <- n.sum.2 + seq_len(length(i))
+    matched.pos[rng.2] <- match(i - 1, row.index[rng.1]) + start[idx] - 1
+    n.sum.1 <- n.sum.1 + col.n[idx]
+    n.sum.2 <- n.sum.2 + length(i)
+  }
+  matched.pos.na <- is.na(matched.pos)
+
+  # Extract actual data
+  matched.data <- matched.pos
+  matched.data[!matched.pos.na] <- data[matched.pos[!matched.pos.na]]
+  matched.data[matched.pos.na] <- 0
+
+  mtx <- matrix(
+    matched.data,
+    nrow = length(i),
+    ncol = length(j),
+    byrow = FALSE
+  )
+
+  mtx
+}
+
 #' Access cellular data
 #'
 #' Retrieves data (feature expression, PCA scores, metrics, etc.) for a set
@@ -467,7 +568,7 @@ FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
             )
             features <- object[[type]][[x]][["features"]][]
             #TODO: try not to load whole matrix
-            data.assay <- as.sparse(object[[type]][[x]][[slot]])
+            data.assay <- object[[type]][[x]][[slot]]
             feature.pos <- match(vars.use, features)
             if (sum(is.na(feature.pos)) > 0) {
               warning(
@@ -477,7 +578,8 @@ FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
               vars.use <- vars.use[!is.na(feature.pos)]
               feature.pos <- feature.pos[!is.na(feature.pos)]
             }
-            data.vars <- t(x = as.matrix(data.assay[feature.pos, cells, drop = FALSE]))
+            data.vars <- t(x = .dgCMatrixGroupSubset(
+              x = data.assay, i = feature.pos, j = cells))
             if (ncol(data.vars) > 0) {
               colnames(x = data.vars) <- paste0(key.use, vars.use)
             }
@@ -512,9 +614,10 @@ FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
     tryCatch(
       expr = {
         #TODO: try not to load whole matrix
-        data.assay <- as.sparse(object[["assays"]][[DefaultAssay(object)]][[slot]])
+        data.assay <- object[["assays"]][[DefaultAssay(object)]][[slot]]
         feature.pos <- match(default.vars, default.assay.features)
-        data.vars <- t(x = as.matrix(data.assay[feature.pos, cells, drop = FALSE]))
+        data.vars <- t(x = .dgCMatrixGroupSubset(
+          x = data.assay, i = feature.pos, j = cells))
         if (ncol(data.vars) > 0) {
           colnames(x = data.vars) <- default.vars
         }
