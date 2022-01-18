@@ -369,47 +369,6 @@ as.Seurat.h5Seurat <- function(
   return(object)
 }
 
-# Too slow
-.dgCMatrixGroupSubsetV1 <- function(x, i, j) {
-  if (!x$exists(name = 'data') || !x$exists(name = 'indices')
-        || !x$exists(name = 'indptr')) {
-    stop("x is not a HDF5 group of dgCMatrix", call. = FALSE)
-  }
-
-  dims <- h5attr(x, "dims")
-  data <- x[["data"]]
-  indices <- x[["indices"]]
-  indptr <- x[["indptr"]]
-
-  if (missing(i))
-    i <- seq_len(dims[1])
-  if (missing(j))
-    j <- seq_len(dims[2])
-
-  coldata <- lapply(
-    X = j,
-    FUN = function(col) {
-      # Get non-zero element number of current column
-      col.n <- indptr[col + 1] - indptr[col]
-      # It's the pos of start and end element of current column.
-      # Conver coords to 1-based.
-      start <- indptr[col] + 1
-      end <- start + col.n - 1
-      # Get pos of non-zero element, that match supplied rows.
-      col.pos <- seq(start, end)
-      data.pos <- match(i - 1, indices[col.pos]) + start - 1
-      data.return <- data.pos
-      data.return[!is.na(data.pos)] <- data[data.pos[!is.na(data.pos)]]
-      data.return[is.na(data.pos)] <- 0
-      data.return
-    }
-  )
-
-  mtx <- do.call(cbind, coldata)
-  mtx[is.na(mtx)] <- 0
-  mtx
-}
-
 .dgCMatrixGroupSubset <- function(x, i, j) {
   if (!x$exists(name = 'data') || !x$exists(name = 'indices')
         || !x$exists(name = 'indptr')) {
@@ -441,7 +400,11 @@ as.Seurat.h5Seurat <- function(
   }
 
   # Get row index of non-zero data in original matrix
-  row.index <- indices[pos]
+  # This step will take a long time for large size `pos`
+  if (length(pos) == indices$dims && identical(pos, seq_len(indices$dims)))
+    row.index <- indices[]
+  else
+    row.index <- indices[pos]
 
   # Get position of queried data
   matched.pos <- integer(length(i) * length(j))
@@ -483,7 +446,7 @@ as.Seurat.h5Seurat <- function(
 #' @export
 FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
   # Convert cell names to positions
-  cells <- cells %||% seq(1, object[["cell.names"]]$dims)
+  cells <- cells %||% seq_len(object[["cell.names"]]$dims)
   if (is.character(x = cells)) {
     cells <- match(cells, Cells(object))
   }
@@ -609,25 +572,27 @@ FetchCellData <- function(object, vars, cells = NULL, slot = 'data') {
   default.assay.features <- object[["assays"]][[DefaultAssay(object)]][["features"]][]
   default.vars <- vars[vars %in% default.assay.features & !(vars %in% names(x = data.fetched))]
   # TODO: warning not found features.
-  data.fetched <- c(
-    data.fetched,
-    tryCatch(
-      expr = {
-        #TODO: try not to load whole matrix
-        data.assay <- object[["assays"]][[DefaultAssay(object)]][[slot]]
-        feature.pos <- match(default.vars, default.assay.features)
-        data.vars <- t(x = .dgCMatrixGroupSubset(
-          x = data.assay, i = feature.pos, j = cells))
-        if (ncol(data.vars) > 0) {
-          colnames(x = data.vars) <- default.vars
+  if (length(default.vars) > 0) {
+    data.fetched <- c(
+      data.fetched,
+      tryCatch(
+        expr = {
+          #TODO: try not to load whole matrix
+          data.assay <- object[["assays"]][[DefaultAssay(object)]][[slot]]
+          feature.pos <- match(default.vars, default.assay.features)
+          data.vars <- t(x = .dgCMatrixGroupSubset(
+            x = data.assay, i = feature.pos, j = cells))
+          if (ncol(data.vars) > 0) {
+            colnames(x = data.vars) <- default.vars
+          }
+          as.list(x = as.data.frame(x = data.vars))
+        },
+        error = function(...) {
+          return(NULL)
         }
-        as.list(x = as.data.frame(x = data.vars))
-      },
-      error = function(...) {
-        return(NULL)
-      }
+      )
     )
-  )
+  }
 
   # Pull identities
   if ('ident' %in% vars && !'ident' %in% names(object[["meta.data"]])) {
